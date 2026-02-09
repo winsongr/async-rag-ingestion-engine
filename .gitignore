@@ -1,1 +1,10 @@
-__pycache__
+__pycache__/
+.venv/
+.env
+.DS_Store
+volumes/
+.vscode 
+*.pyc
+data/
+.ruff_cache
+.pytest_cache

@@ -1,0 +1,111 @@
+services:
+  # --- Infrastructure ---
+  postgres:
+    image: postgres:18.1
+    container_name: cortex-postgres
+    restart: always
+    environment:
+      POSTGRES_USER: cortex
+      POSTGRES_PASSWORD: R29We1aNH3Mt
+      POSTGRES_DB: cortex
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cortex"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:8.4.0
+    container_name: cortex-redis
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  qdrant:
+    image: qdrant/qdrant:v1.16.3
+    container_name: cortex-qdrant
+    restart: always
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/6333'"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # --- Application ---
+  migrate:
+    build: .
+    container_name: cortex-migrate
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - POSTGRES_SERVER=postgres
+      - POSTGRES_USER=cortex
+      - POSTGRES_PASSWORD=R29We1aNH3Mt
+      - POSTGRES_DB=cortex
+    command: alembic upgrade head
+
+  api:
+    build: .
+    container_name: cortex-api
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    ports:
+      - "8002:8000"
+    volumes:
+      - ./src:/app/src
+      - ./tests:/app/tests
+    environment:
+      - POSTGRES_SERVER=postgres
+      - POSTGRES_USER=cortex
+      - POSTGRES_PASSWORD=R29We1aNH3Mt
+      - POSTGRES_DB=cortex
+      - REDIS_HOST=redis
+      - QDRANT_URL=http://qdrant:6333
+    command: uvicorn src.main:app --host 0.0.0.0 --port 8000
+
+  worker:
+    build: .
+    container_name: cortex-worker
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    volumes:
+      - ./src:/app/src
+    environment:
+      - POSTGRES_SERVER=postgres
+      - POSTGRES_USER=cortex
+      - POSTGRES_PASSWORD=R29We1aNH3Mt
+      - POSTGRES_DB=cortex
+      - REDIS_HOST=redis
+      - QDRANT_URL=http://qdrant:6333
+    command: python -m src.workers.document_worker
+
+volumes:
+  postgres_data:
+  redis_data:
+  qdrant_data:

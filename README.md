@@ -1,134 +1,202 @@
-# AI Data Platform (Cortex)
+# AI Data Platform
 
-A production-grade backend system for ingesting large documents, processing them asynchronously, generating vector embeddings, and serving low-latency semantic search and Retrieval-Augmented Generation (RAG) APIs.
+An async document ingestion and RAG backend. Built with clean architecture, queue-based processing, and proper failure handling.
 
-This project is intentionally focused on **reliability, scalability, and real-world failure handling** - not demos or toy examples.
-
----
-
-## Problem
-
-Teams want to “chat with their data” - PDFs, internal documents, tickets, logs - but most systems fail in production due to:
-
-- **Blocking APIs**  
-  Parsing large documents synchronously freezes the server.
-
-- **Data loss**  
-  Transient failures during embedding generation silently drop tasks.
-
-- **Poor scalability**  
-  Naive designs collapse under concurrent uploads.
+It's a working system, not a toy project.
 
 ---
 
-## Solution
+## Architecture
 
-The platform **decouples ingestion from processing** using an event-driven architecture.
-
-APIs remain responsive while CPU- and I/O-heavy workloads are handled asynchronously by worker processes, enabling horizontal scaling and failure isolation.
-
----
-
-## Architecture Overview
-
-High-level data flow from ingestion to retrieval:
+The API stays responsive by pushing heavy work to background workers via Redis.
 
 ```mermaid
-graph LR
-    User["Client"]
-    API["FastAPI API"]
-    Redis[("Redis Broker")]
-    Worker["Celery Worker"]
-    VectorDB[("Qdrant")]
-    PG[("PostgreSQL")]
-    LLM["LLM Provider"]
-
-    User -->|"POST /ingest"| API
-    API -->|"202 Accepted"| User
-    API -->|"Enqueue Task"| Redis
-    Redis -->|"Consume Task"| Worker
-    Worker -->|"Parse & Chunk"| Worker
-    Worker -->|"Generate Embeddings"| LLM
-    Worker -->|"Upsert Vectors"| VectorDB
-    Worker -->|"Update Job State"| PG
+graph TB
+    Client -->|HTTP| API[FastAPI]
+    API -->|Write| PG[(PostgreSQL)]
+    API -->|Enqueue| Redis[(Redis Queue)]
+    Redis -->|BRPOPLPUSH| Worker[Document Worker]
+    Worker -->|Read| FS[File Store]
+    Worker -->|Chunk| Chunker
+    Chunker -->|Embed| Embeddings
+    Embeddings -->|Index| Qdrant[(Qdrant)]
 ```
 
----
-
-## Core Capabilities
-
-- **Non-blocking ingestion**
-  APIs return immediately (`202 Accepted`); heavy processing happens asynchronously.
-
-- **Failure isolation & retries**
-  Automatic retries with exponential backoff for transient failures (LLM, network, I/O).
-
-- **Idempotent processing**
-  File hashing prevents duplicate ingestion and inconsistent job state.
-
-- **Hybrid semantic search**
-  Dense vector retrieval combined with metadata filtering and pagination.
-
-- **Explicit job lifecycle**
-  Clear state transitions:
-  `PENDING → PROCESSING → COMPLETED / FAILED`
+API just coordinates. Workers do the heavy lifting.
 
 ---
 
-## Tech Stack & Design Decisions
+## Design Decisions
 
-| Component      | Choice         | Why This Matters                                               |
-| -------------- | -------------- | -------------------------------------------------------------- |
-| API Layer      | FastAPI        | Native AsyncIO support and strict request validation           |
-| Task Queue     | Celery + Redis | Durable queue with backpressure handling (vs in-process tasks) |
-| Vector Store   | Qdrant         | HNSW indexing and metadata filtering outperform pgvector       |
-| Metadata Store | PostgreSQL     | ACID guarantees for job state and consistency                  |
-| Workers        | Process-based  | Avoids Python GIL limits for CPU-bound workloads               |
-| Infrastructure | Docker Compose | Ensures dev–prod environment parity                            |
+### 1. FastAPI + Async SQLAlchemy
+
+Ingestion is I/O-bound (DB writes, Redis, file uploads), so async makes sense here.
+
+- FastAPI handles concurrent requests without spinning up threads.
+- `asyncpg` keeps database calls non-blocking.
+- API stays responsive even when the queue backs up.
+
+---
+
+### 2. Redis BRPOPLPUSH (At-Least-Once Queue)
+
+I wanted to keep the queue mechanics visible instead of hiding them behind Celery.
+
+- **Backpressure**: Check queue length before enqueueing; return `429` if full.
+- **Ordering**: FIFO.
+- **Atomicity**: `BRPOPLPUSH` moves jobs to a processing queue before work starts.
+- **Failure Model**: At-least-once delivery, on purpose.
+
+Picked Redis over Kafka/SQS to keep failure semantics inspectable and debuggable in a single-node system.
+
+---
+
+### 3. Qdrant for Vector Storage
+
+Qdrant provides:
+
+- Native HNSW indexing
+- Predictable performance under load
+- **Deterministic UUID-based point IDs**
+
+Each chunk ID is derived from `(document_id, chunk_index)` using `uuid5`.
+This guarantees **idempotent re-indexing** with zero duplicate vectors-even after partial failure.
+
+---
+
+### 4. Pluggable Embeddings
+
+Embeddings use an interface so I can swap implementations.
+
+- **Now**: `MockEmbeddingService` - deterministic, free, works in CI
+- **Later**: OpenAI/Anthropic when you need real vectors
+
+Makes it easy to test the full pipeline without burning API credits.
+
+---
+
+## Failure Handling
+
+Things break. Here's how the system deals with it.
+
+### Redis Unavailable
+
+- **During enqueue**: API fails fast (4xx/5xx depending on failure)
+- **During dequeue**: Worker retries with backoff and heartbeat logging
+
+No silent drops. No crashes.
+
+---
+
+### Worker Crash Mid-Processing
+
+- State transitions are explicit and transactional.
+- A crash leaves the document in `PROCESSING`.
+
+Safe to retry because:
+
+- Processing is idempotent
+- Vector IDs are deterministic
+- Re-running just overwrites partial work
+
+---
+
+### Duplicate Requests
+
+- Requests are deduplicated by `source`
+- Existing documents are returned instead of re-created
+
+This prevents both database and vector duplication.
+
+---
+
+### Partial Indexing
+
+If indexing fails mid-document:
+
+- Previously written vectors are overwritten on retry
+- No orphaned or “ghost” vectors remain
+
+This is enforced by deterministic IDs, not cleanup jobs.
+
+---
+
+## Guarantees
+
+1. **Idempotency**
+   Same input → same document → same vectors. Always.
+
+2. **At-Least-Once Processing**
+   Documents are marked `DONE` only after indexing completes.
+   Stuck `PROCESSING` states are expected and safely recoverable via sweeper.
+
+3. **Backpressure**
+   Queue limits are enforced at the API boundary to prevent overload.
+
+4. **State Integrity**
+   Strict state transitions prevent race conditions and invalid reprocessing.
+
+This design targets predictable behavior under bursty ingestion rather than infinite horizontal scale.
+
+---
+
+## Out of Scope
+
+Left out on purpose:
+
+- ❌ Auth / multi-tenancy
+- ❌ Real LLM calls
+- ❌ Paid embedding APIs
+- ❌ Distributed tracing
+
+Would've added complexity without showing anything new.
 
 ---
 
 ## Running Locally
 
-Start all infrastructure:
+### Requirements
+
+- Docker + Docker Compose
+- Python 3.12+
+
+### Startup
 
 ```bash
-make up
-```
+# Infrastructure
+docker-compose up -d
 
-Trigger document ingestion:
+# Environment
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 
-```bash
-curl -X POST \
-  -F "file=@docs/sample.pdf" \
-  http://localhost:8000/api/v1/ingest
-```
+# Database
+alembic upgrade head
 
-Swagger UI:
+# API
+PYTHONPATH=. uvicorn src.main:app --port 8002
 
-```
-http://localhost:8000/docs
+# Worker
+PYTHONPATH=. python src/workers/document_worker.py
 ```
 
 ---
 
-## Scope & Intent
+## Validation
 
-This repository is **not a tutorial**.
+### Benchmarks
 
-It exists to demonstrate:
+```bash
+python scripts/benchmark_latency.py
+```
 
-- Production-safe concurrency
-- Queue-driven system design
-- Async APIs vs process-based workers
-- Vector search trade-offs
-- Failure-aware backend architecture
+Shows p95 latency under load.
 
-There is intentionally **no frontend UI**.
-APIs are exercised via Swagger UI and HTTP clients to keep focus on backend correctness.
+### Tests
 
----
+```bash
+pytest -v
+```
 
-## Status
-
-Actively developed as a reference implementation for **production-grade backend and AI infrastructure systems**.
+Covers failure cases, concurrency, and idempotency.

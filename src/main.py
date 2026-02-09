@@ -1,16 +1,23 @@
 from fastapi import FastAPI
 from src.api.router import router as api_router
+from src.core.config.settings import settings
+from src.infra.lifecycle.app import lifespan
+from src.api.exceptions import global_exception_handler
 
 
 def create_app() -> FastAPI:
     app = FastAPI(
-        title="AI Data Platform",
+        title=settings.PROJECT_NAME,
         version="0.1.0",
-        description="A production-grade backend system for ingesting large documents, processing them asynchronously, generating vector embeddings, and serving low-latency semantic search and Retrieval-Augmented Generation (RAG) APIs.",
+        description="Backend for document ingestion, async processing, vector embeddings, and RAG-based search.",
         docs_url="/docs",
         redoc_url="/redoc",
+        lifespan=lifespan,
     )
-    app.include_router(api_router)
+
+    app.add_exception_handler(Exception, global_exception_handler)
+
+    app.include_router(api_router, prefix=settings.API_V1_STR)
     return app
 
 
