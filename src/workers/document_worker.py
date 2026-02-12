@@ -13,6 +13,12 @@ from src.application.documents.process import DocumentProcessor
 from src.services.chunking import ChunkingService
 from src.services.embeddings import MockEmbeddingService
 from src.infra.vector.index import VectorIndexService
+from src.infra.queue.document_queue import (
+    DLQ_QUEUE,
+    MAX_RETRIES,
+    RETRY_KEY_PREFIX,
+)
+from src.infra.monitoring import DOCUMENTS_PROCESSED
 
 # Configure logging
 logging.basicConfig(
@@ -52,6 +58,9 @@ class DocumentWorker:
         self.queue = DocumentQueue(deps.redis)
         logger.info("Worker initialized with injected dependencies.")
 
+    async def _retry_key(self, doc_id: str) -> str:
+        return f"{RETRY_KEY_PREFIX}{doc_id}"
+
     async def run(self):
         logger.info("Worker starting... Waiting for jobs.")
 
@@ -73,19 +82,84 @@ class DocumentWorker:
                     continue
 
                 logger.info(f"Received job for document: {doc_id}")
-                success = await self.process_job(doc_id, raw_payload)
 
-                if success:
-                    # Acknowledge job only on success (using raw_payload for exact match)
+                try:
+                    # Process with retry wrapper
+                    await self.process(str(doc_id), raw_payload)
+
+                    # On success (no raise), acknowledge
                     await self.queue.acknowledge(raw_payload)
                     logger.info(f"Acknowledged job for document: {doc_id}")
-                # On failure, job stays in processing queue for requeue sweeper
+                except Exception:
+                    # On failure (process raised), loop handles it
+                    # Job stays in processing queue until staleness check or manual intervention
+                    pass
 
                 job_count += 1
 
             except Exception as e:
                 logger.error(f"Worker loop error: {e}")
                 await asyncio.sleep(5)
+
+    async def process(self, document_id: str, raw_payload: bytes):
+        """
+        Process a document with retry logic and DLQ handling.
+        """
+        retry_key = await self._retry_key(document_id)
+        retry_count = int(await self.deps.redis.get(retry_key) or 0)
+
+        if retry_count >= MAX_RETRIES:
+            await self.deps.redis.lpush(DLQ_QUEUE, document_id)
+
+            # Mark failed in DB
+            async with self.deps.session_factory() as session:
+                from src.application.documents.process import DocumentProcessor
+
+                processor = DocumentProcessor(
+                    session=session,
+                    chunking_service=self.deps.chunking_service,
+                    embedding_service=self.deps.embedding_service,
+                    vector_service=self.deps.vector_service,
+                )
+                await processor.mark_failed(
+                    UUID(document_id), reason="max_retries_exceeded"
+                )
+
+            DOCUMENTS_PROCESSED.labels(status="dlq").inc()
+
+            logger.error(
+                "document.moved_to_dlq",
+                extra={
+                    "document_id": document_id,
+                    "retries": retry_count,
+                },
+            )
+
+            # Acknowledge to remove from processing queue (prevent zombie)
+            await self.queue.acknowledge(raw_payload)
+            return
+
+        try:
+            # Pass dummy payload as it's not used by process_job currently
+            # We strictly cast document_id to UUID as process_job expects it
+            success = await self.process_job(UUID(document_id), b"")
+            if not success:
+                raise Exception("Processing returned False")
+
+            # Success
+            await self.deps.redis.delete(retry_key)
+            DOCUMENTS_PROCESSED.labels(status="success").inc()
+
+        except Exception as e:
+            await self.deps.redis.incr(retry_key)
+            logger.warning(
+                "document.retry_scheduled",
+                extra={
+                    "document_id": document_id,
+                    "retry": retry_count + 1,
+                },
+            )
+            raise e
 
     async def process_job(self, doc_id: UUID, raw_payload: bytes) -> bool:
         """

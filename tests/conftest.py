@@ -1,5 +1,5 @@
 """
-Pytest fixtures for AI Data Platform tests.
+Pytest fixtures for Async RAG Ingestion Engine tests.
 Provides shared test infrastructure without testing libraries.
 """
 

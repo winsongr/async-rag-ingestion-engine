@@ -78,8 +78,10 @@ class DocumentProcessor:
             # Propagate error so worker can handle retries/failure marking
             raise AppError(f"Processing failed: {str(e)}") from e
 
-    async def mark_failed(self, doc_id: UUID):
+    async def mark_failed(self, doc_id: UUID, reason: str | None = None):
         """Helper to mark document as failed and cleanup file."""
+        if reason:
+            logger.warning(f"Marking document {doc_id} as FAILED. Reason: {reason}")
         async with self.session.begin():
             doc = await self.repo.get_document_by_id(doc_id)
             if doc and doc.file_path:

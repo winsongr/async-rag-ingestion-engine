@@ -1,3 +1,4 @@
+from prometheus_client import Counter
 from src.infra.db.postgres import check_database_connection
 from src.infra.cache.redis import check_redis_connection
 from src.infra.vector.qdrant import check_qdrant_connection
@@ -38,3 +39,8 @@ async def check_all_infrastructure() -> dict[str, bool | str]:
         status["qdrant"] = str(e)
 
     return status
+
+
+DOCUMENTS_PROCESSED = Counter(
+    "documents_processed_total", "Total number of documents processed", ["status"]
+)

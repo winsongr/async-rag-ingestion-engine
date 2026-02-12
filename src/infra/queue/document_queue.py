@@ -4,9 +4,12 @@ import logging
 from uuid import UUID
 from redis.asyncio import Redis
 
-MAIN_QUEUE = "document_ingestion_queue"
-PROCESSING_QUEUE = "document_processing_queue"
-DEAD_LETTER_QUEUE = "document_dead_letter_queue"
+DOCUMENT_QUEUE = "documents:pending"
+PROCESSING_QUEUE = "documents:processing"
+DLQ_QUEUE = "documents:dlq"
+
+MAX_RETRIES = 3
+RETRY_KEY_PREFIX = "documents:retry:"
 
 logger = logging.getLogger("document_queue")
 
@@ -18,7 +21,7 @@ class DocumentQueue:
     async def enqueue(self, document_id: UUID):
         """Push document ID to the main queue."""
         payload = json.dumps({"document_id": str(document_id)})
-        await self.redis.rpush(MAIN_QUEUE, payload)
+        await self.redis.rpush(DOCUMENT_QUEUE, payload)
 
     async def dequeue(self) -> tuple[UUID | None, bytes | None]:
         """
@@ -29,7 +32,9 @@ class DocumentQueue:
         - Job stays in processing queue until acknowledged
         - On crash, job can be recovered from processing queue
         """
-        result = await self.redis.brpoplpush(MAIN_QUEUE, PROCESSING_QUEUE, timeout=2)
+        result = await self.redis.brpoplpush(
+            DOCUMENT_QUEUE, PROCESSING_QUEUE, timeout=2
+        )
         if not result:
             return None, None
 
@@ -88,12 +93,12 @@ class DocumentQueue:
             "reason": reason,
             "timestamp": time.time(),
         }
-        await self.redis.rpush(DEAD_LETTER_QUEUE, json.dumps(entry))
+        await self.redis.rpush(DLQ_QUEUE, json.dumps(entry))
         logger.error(f"Moved to DLQ: {reason} - {msg_str[:100]}")
 
     async def get_queue_length(self) -> int:
         """Get current main queue length for backpressure control."""
-        return await self.redis.llen(MAIN_QUEUE)
+        return await self.redis.llen(DOCUMENT_QUEUE)
 
     async def get_processing_queue_length(self) -> int:
         """Get current processing queue length (in-flight jobs)."""
@@ -101,7 +106,7 @@ class DocumentQueue:
 
     async def get_dlq_length(self) -> int:
         """Get dead letter queue length."""
-        return await self.redis.llen(DEAD_LETTER_QUEUE)
+        return await self.redis.llen(DLQ_QUEUE)
 
     async def requeue_stale_jobs(
         self, max_age_seconds: float = 300, max_retries: int = 3
@@ -155,7 +160,7 @@ class DocumentQueue:
                     "document_id": payload["document_id"],
                     "retry_count": retry_count + 1,
                 }
-                await self.redis.lpush(MAIN_QUEUE, json.dumps(requeue_payload))
+                await self.redis.lpush(DOCUMENT_QUEUE, json.dumps(requeue_payload))
                 requeued += 1
                 logger.info(
                     f"Requeued stale job {payload['document_id']} (retry {retry_count + 1}, was {age:.0f}s old)"

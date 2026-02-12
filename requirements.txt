@@ -14,3 +14,4 @@ qdrant-client==1.16.2
 redis==7.1.0
 SQLAlchemy==2.0.45
 uvicorn==0.40.0
+prometheus_client==0.23.1

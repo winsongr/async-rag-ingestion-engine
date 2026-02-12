@@ -1,8 +1,9 @@
-# AI Data Platform
+# Async RAG Ingestion Engine
 
-An async document ingestion and RAG backend. Built with clean architecture, queue-based processing, and proper failure handling.
+**Part 1 of the Sentinel System - Deterministic Data Pipeline for Financial AI**
 
-It's a working system, not a toy project.
+This service handles ingestion correctness and failure recovery.  
+Workflow correctness is handled by the companion system (`transaction-engine`).
 
 ---
 
@@ -20,6 +21,7 @@ graph TB
     Worker -->|Chunk| Chunker
     Chunker -->|Embed| Embeddings
     Embeddings -->|Index| Qdrant[(Qdrant)]
+    Worker -->|On max retries| DLQ[(Redis DLQ)]
 ```
 
 API just coordinates. Workers do the heavy lifting.
@@ -66,18 +68,18 @@ This guarantees **idempotent re-indexing** with zero duplicate vectors-even afte
 
 ### 4. Pluggable Embeddings
 
-Embeddings use an interface so I can swap implementations.
+Embeddings use an interface so implementations can be swapped cleanly.
 
-- **Now**: `MockEmbeddingService` - deterministic, free, works in CI
-- **Later**: OpenAI/Anthropic when you need real vectors
+- **Now**: `MockEmbeddingService` - deterministic, free, CI-friendly
+- **Later**: OpenAI / Anthropic when real vectors are required
 
-Makes it easy to test the full pipeline without burning API credits.
+This keeps the ingestion pipeline testable without burning API credits.
 
 ---
 
 ## Failure Handling
 
-Things break. Here's how the system deals with it.
+Things break. Here's how the system behaves when they do.
 
 ### Redis Unavailable
 
@@ -97,7 +99,7 @@ Safe to retry because:
 
 - Processing is idempotent
 - Vector IDs are deterministic
-- Re-running just overwrites partial work
+- Re-running overwrites partial work
 
 ---
 
@@ -128,7 +130,7 @@ This is enforced by deterministic IDs, not cleanup jobs.
 
 2. **At-Least-Once Processing**
    Documents are marked `DONE` only after indexing completes.
-   Stuck `PROCESSING` states are expected and safely recoverable via sweeper.
+   Stuck `PROCESSING` states are expected and safely recoverable.
 
 3. **Backpressure**
    Queue limits are enforced at the API boundary to prevent overload.
@@ -137,6 +139,15 @@ This is enforced by deterministic IDs, not cleanup jobs.
    Strict state transitions prevent race conditions and invalid reprocessing.
 
 This design targets predictable behavior under bursty ingestion rather than infinite horizontal scale.
+
+---
+
+## Failure Semantics
+
+- At-least-once delivery
+- Bounded retries (max 3)
+- Poison jobs moved to Redis DLQ
+- DLQ inspectable via `/admin/dlq`
 
 ---
 
@@ -149,7 +160,7 @@ Left out on purpose:
 - ❌ Paid embedding APIs
 - ❌ Distributed tracing
 
-Would've added complexity without showing anything new.
+Would've added complexity without improving signal.
 
 ---
 

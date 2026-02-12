@@ -39,7 +39,7 @@ async def test_ingestion_and_search():
             return False
 
         # Upload a test file
-        test_content = "This is a production-grade AI data platform with proper resource lifecycle management."
+        test_content = "This is a production-grade Async RAG Ingestion Engine with proper resource lifecycle management."
         test_file_path = Path("/tmp/production_test.txt")
         test_file_path.write_text(test_content)
 

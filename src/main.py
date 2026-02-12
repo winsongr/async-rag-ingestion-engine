@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from prometheus_client import make_asgi_app
 from src.api.router import router as api_router
 from src.core.config.settings import settings
 from src.infra.lifecycle.app import lifespan
@@ -18,6 +19,11 @@ def create_app() -> FastAPI:
     app.add_exception_handler(Exception, global_exception_handler)
 
     app.include_router(api_router, prefix=settings.API_V1_STR)
+
+    # Prometheus metrics endpoint
+    metrics_app = make_asgi_app()
+    app.mount("/metrics", metrics_app)
+
     return app
 
 

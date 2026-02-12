@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup checking
-    logger.info("Starting up AI Data Platform...")
+    logger.info("Starting up Async RAG Ingestion Engine...")
 
     # Store clients in app state
     app.state.redis = redis_client
@@ -38,7 +38,7 @@ async def lifespan(app: FastAPI):
     yield
 
     # Shutdown cleanup
-    logger.info("Shutting down AI Data Platform...")
+    logger.info("Shutting down Async RAG Ingestion Engine...")
 
     logger.info("Closing Database engine...")
     await engine.dispose()

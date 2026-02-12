@@ -4,6 +4,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, status, HTTPException, UploadFile, File
 from sqlalchemy.ext.asyncio import AsyncSession
 from redis.asyncio import Redis
+from src.infra.queue.document_queue import DLQ_QUEUE
 
 from src.infra.db.dependencies import get_db_session
 from src.infra.lifecycle.dependencies import get_redis_client
@@ -84,3 +85,12 @@ async def upload_document(
         raise HTTPException(status_code=400, detail=str(e))
     except AppError as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/admin/dlq")
+async def inspect_dlq(redis: Annotated[Redis, Depends(get_redis_client)]):
+    ids = await redis.lrange(DLQ_QUEUE, 0, -1)
+    return {
+        "count": len(ids),
+        "documents": ids,
+    }

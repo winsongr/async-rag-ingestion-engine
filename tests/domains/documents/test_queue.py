@@ -2,7 +2,12 @@
 
 import pytest
 from unittest.mock import AsyncMock
-from src.infra.queue.document_queue import DocumentQueue, MAIN_QUEUE, PROCESSING_QUEUE
+from src.infra.queue.document_queue import (
+    DocumentQueue,
+    DOCUMENT_QUEUE,
+    PROCESSING_QUEUE,
+    DLQ_QUEUE,
+)
 from uuid import uuid4
 import json
 
@@ -21,7 +26,7 @@ async def test_enqueue_dequeue_roundtrip():
     # Verify Redis rpush called with correct payload
     mock_redis.rpush.assert_called_once()
     call_args = mock_redis.rpush.call_args
-    assert call_args[0][0] == MAIN_QUEUE
+    assert call_args[0][0] == DOCUMENT_QUEUE
 
     payload = json.loads(call_args[0][1])
     assert payload["document_id"] == str(doc_id)
@@ -46,7 +51,7 @@ async def test_dequeue_success():
     assert raw_parsed["document_id"] == str(doc_id)
     assert "started_at" in raw_parsed
     mock_redis.brpoplpush.assert_called_once_with(
-        MAIN_QUEUE, PROCESSING_QUEUE, timeout=2
+        DOCUMENT_QUEUE, PROCESSING_QUEUE, timeout=2
     )
 
 
@@ -80,7 +85,7 @@ async def test_malformed_payload_handling():
     # Verify DLQ was called
     mock_redis.rpush.assert_called_once()
     dlq_call = mock_redis.rpush.call_args
-    assert "document_dead_letter_queue" in dlq_call[0][0]
+    assert dlq_call[0][0] == DLQ_QUEUE
 
 
 @pytest.mark.asyncio
@@ -106,10 +111,12 @@ async def test_acknowledge_success():
     queue = DocumentQueue(mock_redis)
     doc_id = uuid4()
     # Acknowledge now takes raw_payload bytes, not UUID
-    raw_payload = json.dumps({
-        "document_id": str(doc_id),
-        "started_at": 1234567890.0,
-    }).encode()
+    raw_payload = json.dumps(
+        {
+            "document_id": str(doc_id),
+            "started_at": 1234567890.0,
+        }
+    ).encode()
 
     await queue.acknowledge(raw_payload)
 
@@ -126,7 +133,7 @@ async def test_queue_length_for_backpressure():
     length = await queue.get_queue_length()
 
     assert length == 500
-    mock_redis.llen.assert_called_once_with(MAIN_QUEUE)
+    mock_redis.llen.assert_called_once_with(DOCUMENT_QUEUE)
 
 
 @pytest.mark.asyncio
@@ -139,7 +146,7 @@ async def test_move_to_dlq():
 
     mock_redis.rpush.assert_called_once()
     call = mock_redis.rpush.call_args
-    assert call[0][0] == "document_dead_letter_queue"
+    assert call[0][0] == DLQ_QUEUE
     entry = json.loads(call[0][1])
     assert entry["reason"] == "Parse error"
     assert "timestamp" in entry

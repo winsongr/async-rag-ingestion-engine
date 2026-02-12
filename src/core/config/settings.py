@@ -7,7 +7,7 @@ class Settings(BaseSettings):
     )
 
     API_V1_STR: str = "/api/v1"
-    PROJECT_NAME: str = "AI Data Platform"
+    PROJECT_NAME: str = "Async RAG Ingestion Engine"
 
     # Postgres
     POSTGRES_SERVER: str = "localhost"

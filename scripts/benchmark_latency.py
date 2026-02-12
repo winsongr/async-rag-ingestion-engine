@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Benchmark script for AI Data Platform.
+Benchmark script for Async RAG Ingestion Engine.
 
 Measures:
 - Ingestion latency (p50, p95, p99)
@@ -137,7 +137,7 @@ def print_results(name: str, results: dict):
 async def main():
     """Run all benchmarks and provide insights."""
     print("=" * 60)
-    print("🚀 AI Data Platform - Performance Benchmarks")
+    print("🚀 Async RAG Ingestion Engine - Performance Benchmarks")
     print("=" * 60)
     print()
     print("Testing against:", API_BASE)
